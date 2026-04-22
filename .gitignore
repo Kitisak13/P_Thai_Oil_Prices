@@ -1,0 +1,14 @@
+# Ignore data folder and its contents
+Data/
+
+# Ignore all excel files in the root or any directory
+*.xls
+*.xlsx
+
+# Ignore CSV output files
+*.csv
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
