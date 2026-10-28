@@ -162,7 +162,8 @@ function dailySyncOilPrice() {
 function buildScraperApiUrl(targetUrl, apiKey, sessionNumber) {
   var url = 'https://api.scraperapi.com/?api_key=' + encodeURIComponent(apiKey) +
             '&url=' + encodeURIComponent(targetUrl) +
-            '&country_code=th';
+            '&country_code=th' +
+            '&premium=true';
   if (sessionNumber) {
     url += '&session_number=' + encodeURIComponent(sessionNumber);
   }
@@ -531,7 +532,7 @@ function diagnoseEppoConnection() {
     return;
   }
 
-  console.info("=== Testing ScraperAPI with country_code=th ===");
+  console.info("=== Testing ScraperAPI with country_code=th & premium=true ===");
   var sessionNumber = Math.floor(Math.random() * 8999999 + 1000000);
   var testUrl = buildScraperApiUrl(config.eppoUrl, config.scraperApiKey, sessionNumber);
 
