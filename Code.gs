@@ -1,17 +1,18 @@
 /**
  * ==============================================================================
- * Thai Oil Price Daily Auto-Sync Backend (Google Apps Script)
+ * Thai Oil Price Daily Auto-Sync Backend (Google Apps Script + ScraperAPI)
  * ==============================================================================
  * ดึงข้อมูลราคาน้ำมันขายปลีกรายวันจากสำนักงานนโยบายและแผนพลังงาน (EPPO)
+ * ผ่าน ScraperAPI (Residential Proxy ประเทศไทย) เพื่อข้ามการบล็อกของ Incapsula WAF
  * และบันทึกต่อท้าย Google Sheet แบบ Wide Format อัตโนมัติวันละ 2 รอบ (08:00 และ 16:00 น.)
  * 
  * ความต้องการเบื้องต้น:
- * 1. ต้องเปิดใช้งานบริการ "Drive API" ใน Apps Script (Services > + > Drive API)
- * 2. โครงสร้าง Google Sheet: Wide Format (Date, Product, PTT, BCP, Shell, ...)
+ * 1. เปิดใช้งานบริการ "Drive API" ใน Apps Script (Services > + > Drive API)
+ * 2. ตั้งค่า "SCRAPERAPI_KEY" ใน Script Properties (Project Settings > Script Properties)
+ * 3. โครงสร้าง Google Sheet: Wide Format (Date, Product, PTT, BCP, Shell, ...)
  * ==============================================================================
  */
 
-// รายชื่อหัวคอลัมน์บริษัทตามลำดับมาตรฐาน
 var COMPANY_ORDER = [
   'PTT', 'BCP', 'Shell', 'Esso', 'Chevron', 'IRPC', 'PT', 'Susco', 'Pure', 'SUSCO Dealers'
 ];
@@ -35,10 +36,18 @@ var PRODUCT_MAPPING = {
  * --------------------------------------------------------------------------
  * 1. การตั้งค่าและอ่านตัวแปรจาก Script Properties
  * --------------------------------------------------------------------------
+ * ตัวแปรที่รองรับ (ตั้งค่าได้ที่ Project Settings > Script Properties):
+ * - SCRAPERAPI_KEY    : [จำเป็น] API Key จาก scraperapi.com
+ * - TARGET_SHEET_NAME : ชื่อแท็บใน Google Sheet ที่เก็บข้อมูล (ค่าเริ่มต้น: แท็บแรก)
+ * - SPREADSHEET_ID    : ID ของ Google Sheet (กรณีใช้งานแบบ Standalone Script)
+ * - EPPO_URL          : URL หน้าเว็บ EPPO (ค่าเริ่มต้น: https://www2.eppo.go.th/epporop/entryreport/ropbydaypublic.aspx)
+ * - TIMEZONE          : ไทม์โซน (ค่าเริ่มต้น: Asia/Bangkok)
+ * - LINE_NOTIFY_TOKEN : Token สำหรับส่งการแจ้งเตือนเข้า LINE (ทางเลือก)
  */
 function getConfig() {
   var props = PropertiesService.getScriptProperties().getProperties();
   return {
+    scraperApiKey: props['SCRAPERAPI_KEY'] || '',
     targetSheetName: props['TARGET_SHEET_NAME'] || '',
     spreadsheetId: props['SPREADSHEET_ID'] || '',
     eppoUrl: props['EPPO_URL'] || 'https://www2.eppo.go.th/epporop/entryreport/ropbydaypublic.aspx',
@@ -48,7 +57,7 @@ function getConfig() {
 }
 
 /**
- * ดึงออบเจ็กต์ Sheet ปลายทาง (รองรับทั้ง Container-bound และ Standalone)
+ * ดึงออบเจ็กต์ Sheet ปลายทาง
  */
 function getTargetSheet(config) {
   var ss;
@@ -102,6 +111,10 @@ function isDateAlreadyProcessed(sheet, targetDateStr) {
  */
 function dailySyncOilPrice() {
   var config = getConfig();
+  if (!config.scraperApiKey) {
+    throw new Error("Missing 'SCRAPERAPI_KEY'. Please configure it in Project Settings > Script Properties.");
+  }
+
   var now = new Date();
   var dateIso = Utilities.formatDate(now, config.timezone, 'yyyy-MM-dd'); // 2026-10-28
   var dateEppo = Utilities.formatDate(now, config.timezone, 'dd/MM/yyyy'); // 28/10/2026
@@ -116,10 +129,10 @@ function dailySyncOilPrice() {
     return "SKIPPED_ALREADY_EXISTS";
   }
 
-  // 2. ดึงข้อมูลจาก EPPO
+  // 2. ดึงข้อมูลจาก EPPO ผ่าน ScraperAPI (Proxy ประเทศไทย)
   var result = fetchAndParseEppoData(dateIso, dateEppo, config);
   if (!result || !result.rows || result.rows.length === 0) {
-    console.warn("No oil price data available from EPPO for " + dateIso + " (Possible holiday or no price announcement yet).");
+    console.warn("No oil price data returned from EPPO for " + dateIso + " (Possible holiday or no price announcement yet).");
     return "NO_DATA_AVAILABLE";
   }
 
@@ -129,7 +142,7 @@ function dailySyncOilPrice() {
   var numCols = result.rows[0].length;
   sheet.getRange(startRow, 1, numRows, numCols).setValues(result.rows);
 
-  console.info("Successfully appended " + numRows + " rows for " + dateIso + " starting at row " + startRow);
+  console.info("✅ Successfully appended " + numRows + " rows for " + dateIso + " starting at row " + startRow);
 
   // 4. บันทึกวันที่ล่าสุดลง Script Properties
   PropertiesService.getScriptProperties().setProperty('LAST_SYNCED_DATE', dateIso);
@@ -143,55 +156,52 @@ function dailySyncOilPrice() {
 }
 
 /**
- * คืนค่า HTTP Headers แบบจำลอง Browser เต็มรูปแบบ
+ * สร้าง URL สำหรับเรียกผ่าน ScraperAPI Gateway
+ * ล็อค country_code=th (Residential IP ในไทย) และ session_number เพื่อเชื่อมโยง GET + POST เข้า Session เดียวกัน
  */
-function getBrowserHeaders() {
-  return {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'th,en-US;q=0.9,en;q=0.8',
-    'Cache-Control': 'no-cache',
-    'Pragma': 'no-cache',
-    'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1'
-  };
+function buildScraperApiUrl(targetUrl, apiKey, sessionNumber) {
+  var url = 'https://api.scraperapi.com/?api_key=' + encodeURIComponent(apiKey) +
+            '&url=' + encodeURIComponent(targetUrl) +
+            '&country_code=th';
+  if (sessionNumber) {
+    url += '&session_number=' + encodeURIComponent(sessionNumber);
+  }
+  return url;
 }
 
 /**
  * --------------------------------------------------------------------------
- * 4. เชื่อมต่อ EPPO Web Scraper และดาวน์โหลดไฟล์
+ * 4. เชื่อมต่อ EPPO ผ่าน ScraperAPI (ข้าม Incapsula ด้วย Thai Proxy)
  * --------------------------------------------------------------------------
  */
 function fetchAndParseEppoData(dateIso, dateEppo, config) {
-  var headers = getBrowserHeaders();
+  // สร้าง Session ID แบบสุ่ม เพื่อให้ทั้ง GET (ViewState) และ POST (Download) ใช้ IP ก้อนเดียวกัน
+  var sessionNumber = Math.floor(Math.random() * 8999999 + 1000000);
+  console.info("Using ScraperAPI Session Number: " + sessionNumber + " with country_code=th");
 
-  // Step A: Initial GET to fetch ASP.NET tokens
-  console.info("Fetching initial page to extract ASP.NET tokens...");
-  var initRes = UrlFetchApp.fetch(config.eppoUrl, {
+  // Step A: GET initial page to extract ASP.NET ViewState tokens
+  var getProxyUrl = buildScraperApiUrl(config.eppoUrl, config.scraperApiKey, sessionNumber);
+  console.info("Requesting initial page via ScraperAPI...");
+  
+  var initRes = UrlFetchApp.fetch(getProxyUrl, {
     method: 'get',
-    headers: headers,
-    muteHttpExceptions: true,
-    followRedirects: true
+    muteHttpExceptions: true
   });
 
   var initCode = initRes.getResponseCode();
   if (initCode !== 200) {
-    console.error("HTTP Status Code: " + initCode);
-    console.error("Response Headers: " + JSON.stringify(initRes.getHeaders()));
-    console.error("Response Body Preview (1500 chars):\n" + initRes.getContentText().substring(0, 1500));
-    throw new Error("Failed to reach EPPO site. HTTP Status: " + initCode + " (See Execution Log for details)");
+    console.error("ScraperAPI GET failed with status: " + initCode);
+    console.error("Response Preview:\n" + initRes.getContentText().substring(0, 1000));
+    throw new Error("ScraperAPI GET failed. HTTP Status: " + initCode);
   }
 
   var tokens = extractAspNetTokens(initRes.getContentText());
+  console.info("ASP.NET Tokens extracted successfully (ViewState length: " + tokens.__VIEWSTATE.length + ")");
 
   // Step B: POST request requesting Excel report for target date
-  console.info("Requesting report for " + dateEppo + "...");
+  var postProxyUrl = buildScraperApiUrl(config.eppoUrl, config.scraperApiKey, sessionNumber);
+  console.info("Requesting Excel report for " + dateEppo + " via ScraperAPI...");
+
   var payload = {
     '__VIEWSTATE': tokens.__VIEWSTATE,
     '__VIEWSTATEGENERATOR': tokens.__VIEWSTATEGENERATOR,
@@ -201,34 +211,33 @@ function fetchAndParseEppoData(dateIso, dateEppo, config) {
     'BtnGenerate.y': '10'
   };
 
-  var postHeaders = getBrowserHeaders();
-  postHeaders['Referer'] = config.eppoUrl;
-  postHeaders['Origin'] = 'https://www2.eppo.go.th';
-
-  var postRes = UrlFetchApp.fetch(config.eppoUrl, {
+  var postRes = UrlFetchApp.fetch(postProxyUrl, {
     method: 'post',
     payload: payload,
-    headers: postHeaders,
-    muteHttpExceptions: true,
-    followRedirects: true
+    muteHttpExceptions: true
   });
 
-  if (postRes.getResponseCode() !== 200) {
-    console.error("POST Status: " + postRes.getResponseCode());
-    console.error("POST Response Body:\n" + postRes.getContentText().substring(0, 1500));
-    throw new Error("POST request to EPPO failed with HTTP " + postRes.getResponseCode());
+  var postCode = postRes.getResponseCode();
+  if (postCode !== 200) {
+    console.error("ScraperAPI POST failed with status: " + postCode);
+    console.error("POST Response:\n" + postRes.getContentText().substring(0, 1000));
+    throw new Error("ScraperAPI POST failed. HTTP Status: " + postCode);
   }
 
   var contentType = postRes.getHeaders()['Content-Type'] || '';
   var blob = postRes.getBlob();
   var bytes = blob.getBytes();
 
+  // ตรวจสอบว่าเป็นไฟล์ Excel (.xls BIFF8: 0xD0, 0xCF, 0x11, 0xE0) หรือไม่
   var isBiff8 = bytes.length > 8 && (bytes[0] & 0xFF) === 0xD0 && (bytes[1] & 0xFF) === 0xCF && (bytes[2] & 0xFF) === 0x11 && (bytes[3] & 0xFF) === 0xE0;
   var isExcel = contentType.indexOf('application/vnd.ms-excel') !== -1 || isBiff8 || bytes.length > 50000;
 
   if (!isExcel) {
+    console.warn("Response is not an Excel file. Size: " + bytes.length + " bytes.");
     return null;
   }
+
+  console.info("Received Excel file (" + bytes.length + " bytes). Converting via Drive API...");
 
   // Step C: แปลง .xls เป็น Google Sheet ชั่วคราวผ่าน Drive API
   blob.setName('EPPO_RetailOilPrice_on_' + dateIso.replace(/-/g, '') + '.xls');
@@ -249,7 +258,7 @@ function fetchAndParseEppoData(dateIso, dateEppo, config) {
 }
 
 /**
- * แยกสกัด Token ของ ASP.NET จาก HTML
+ * สกัด Token ASP.NET จาก HTML
  */
 function extractAspNetTokens(html) {
   function getVal(idName) {
@@ -503,7 +512,7 @@ function removeDailyTriggers() {
 
 /**
  * --------------------------------------------------------------------------
- * 8. ฟังก์ชันวินิจฉัยและทดสอบการเชื่อมต่อ (Diagnostic & Testing)
+ * 8. ฟังก์ชันวินิจฉัยและทดสอบการเชื่อมต่อ ScraperAPI
  * --------------------------------------------------------------------------
  */
 function testRunToday() {
@@ -513,41 +522,43 @@ function testRunToday() {
 }
 
 /**
- * ฟังก์ชันสำหรับวินิจฉัยสาเหตุ HTTP 403 โดยเฉพาะ
- * ให้เลือกฟังก์ชันนี้แล้วกด 'Run' ใน Apps Script เพื่อดู Response Body และ Headers
+ * ทดสอบการดึงข้อมูลผ่าน ScraperAPI ว่าบายพาส Incapsula ได้หรือไม่
  */
 function diagnoseEppoConnection() {
   var config = getConfig();
-  console.info("=== Diagnosing Connection to: " + config.eppoUrl + " ===");
+  if (!config.scraperApiKey) {
+    console.error("❌ Missing 'SCRAPERAPI_KEY'. Please add it in Project Settings > Script Properties.");
+    return;
+  }
 
-  var headers = getBrowserHeaders();
+  console.info("=== Testing ScraperAPI with country_code=th ===");
+  var sessionNumber = Math.floor(Math.random() * 8999999 + 1000000);
+  var testUrl = buildScraperApiUrl(config.eppoUrl, config.scraperApiKey, sessionNumber);
 
   try {
-    var res = UrlFetchApp.fetch(config.eppoUrl, {
+    var res = UrlFetchApp.fetch(testUrl, {
       method: 'get',
-      headers: headers,
-      muteHttpExceptions: true,
-      followRedirects: true
+      muteHttpExceptions: true
     });
 
     var code = res.getResponseCode();
-    var resHeaders = res.getHeaders();
     var text = res.getContentText();
 
-    console.info("Response Code: " + code);
-    console.info("Response Headers: " + JSON.stringify(resHeaders, null, 2));
-    console.info("Response Body Length: " + text.length + " characters");
-    console.info("Response Body Preview (first 1500 chars):\n" + text.substring(0, 1500));
+    console.info("ScraperAPI HTTP Status: " + code);
+    console.info("Response Length: " + text.length + " chars");
 
     if (code === 200) {
-      console.info("✅ SUCCESS! Page fetched successfully with custom browser headers.");
-      var tokens = extractAspNetTokens(text);
-      console.info("Extracted ViewState length: " + tokens.__VIEWSTATE.length);
+      if (text.indexOf('__VIEWSTATE') !== -1) {
+        var tokens = extractAspNetTokens(text);
+        console.info("✅ SUCCESS! Bypassed Incapsula successfully. ViewState length: " + tokens.__VIEWSTATE.length);
+      } else {
+        console.warn("⚠️ HTTP 200 returned, but __VIEWSTATE not found. Preview:\n" + text.substring(0, 500));
+      }
     } else {
-      console.warn("⚠️ Server responded with HTTP " + code + ". Inspect the Response Body above to identify the firewall/WAF rule.");
+      console.error("❌ ScraperAPI returned HTTP " + code + ". Response:\n" + text.substring(0, 500));
     }
   } catch (e) {
-    console.error("Exception during fetch: " + e.message);
+    console.error("Exception during ScraperAPI test: " + e.message);
   }
 }
 
