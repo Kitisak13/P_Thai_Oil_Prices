@@ -1,26 +1,94 @@
-# Thai Oil Price Scraper & Combiner
+# Thai Oil Price Scraper & Pipeline
 
-โปรเจ็คนี้ใช้สำหรับดาวน์โหลดและรวบรวมข้อมูลราคาน้ำมันขายปลีกในเขตพื้นที่กรุงเทพมหานครและปริมณฑลแบบรายวัน จากเว็บไซต์ของสำนักงานนโยบายและแผนพลังงาน (EPPO - Energy Policy and Planning Office) 
+ระบบดาวน์โหลดและประมวลผลข้อมูลราคาน้ำมันขายปลีกในเขตพื้นที่กรุงเทพมหานครและปริมณฑลแบบรายวัน จากเว็บไซต์ของสำนักงานนโยบายและแผนพลังงาน (EPPO - Energy Policy and Planning Office)
 
-ข้อมูลที่ได้จะถูกจัดให้อยู่ในรูปแบบ Database Long Form เพื่อให้นำไปวิเคราะห์ต่อ (Data Analysis) หรือทำ Data Visualization ได้โดยง่าย
+ระบบได้รับการออกแบบใหม่ตามแนวทาง Data Engineering และ DevOps Production Best Practices:
+- **Resilience & Idempotency:** รองรับ Dynamic ASP.NET ViewState Token, Request Timeout, Auto-retry, และข้ามไฟล์ที่มีอยู่แล้ว
+- **Incremental Sync:** ตรวจหาวันที่ล่าสุดที่มีในระบบโดยอัตโนมัติ และดึงเฉพาะข้อมูลวันใหม่จนถึงปัจจุบัน
+- **Dynamic Header Parsing:** จับคู่ชื่อบริษัทน้ำมันจากตารางหัวเรื่องจริงอย่างยืดหยุ่น ป้องกันปัญหาการจัดลำดับคอลัมน์สลับตำแหน่ง
+- **Dual Data Modeling (Wide & Long Format):** ส่งออกทั้งตารางสรุปแบบกว้าง (Wide Format) และ Tidy Data (Long Format) ที่พร้อมนำเข้าสู่ Power BI, Looker Studio หรือฐานข้อมูล SQL
+- **High-Performance Storage:** รองรับการจัดเก็บทั้งไฟล์ CSV (`utf-8-sig`) และ Apache Parquet (`.parquet`)
 
-## โครงสร้างของโปรเจ็ค
-- `main.py` - สคริปต์สำหรับส่ง HTTP POST ไปยังเว็บไซต์ EPPO เพื่อดาวน์โหลดไฟล์ Excel ราคาน้ำมันแบบรายวันมาบันทึกในระบบ
-- `combine_data.py` - สคริปต์สำหรับอ่านและทำความสะอาด (Clean) ข้อมูลดิบจากไฟล์ Excel ทั้งหมด นำมารวมและส่งออกเป็นไฟล์ `Combined_Oil_Prices.csv`
-- `Data/` - โฟลเดอร์ที่ใช้สำหรับเก็บไฟล์ Excel ดิบที่โหลดมา (ถูก Ignore ไว้ไม่ให้อัพโหลดขึ้น Git)
-- `PROCESS.md` - เอกสารอธิบายการใช้งานและลำดับการรันคำสั่งต่างๆ
+---
 
-## ความต้องการของระบบ (Requirements)
-โปรเจ็คนี้พัฒนาด้วย Python จำเป็นต้องติดตั้ง Library ดังต่อไปนี้:
-```bash
-pip install requests beautifulsoup4 pandas xlrd numpy
+## สถาปัตยกรรมและโครงสร้างไฟล์
+
+```text
+Thai-Oil-Price/
+├── data/
+│   ├── raw/                  # แหล่งจัดเก็บไฟล์ Excel ดิบรายวัน (.xls)
+│   └── processed/            # ผลลัพธ์ข้อมูลที่รวมและ Clean แล้ว (.csv, .parquet)
+│       ├── Combined_Oil_Prices_Wide.csv
+│       ├── Combined_Oil_Prices_Wide.parquet
+│       ├── Combined_Oil_Prices_Long.csv
+│       └── Combined_Oil_Prices_Long.parquet
+├── dev_reviews/              # เอกสาร Code Review & Architecture Review
+├── main.py                   # Data Scraper (ดึงข้อมูลดิบจากเว็บ EPPO)
+├── combine_data.py           # Data Transformer (Clean, Parse, จัดรูปแบบ Wide/Long)
+├── requirements.txt          # Library Dependencies
+├── Combined_Oil_Prices.csv   # ไฟล์ Wide Format ฉบับเข้ากันได้กับโค้ดเวอร์ชันเดิม
+├── PROCESS.md                # คู่มือขั้นตอนการทำงานและคำสั่ง CLI
+└── README.md                 # เอกสารแนะนำโครงการ
 ```
-*(หมายเหตุ: `xlrd` เป็นสิ่งจำเป็นในการอ่านไฟล์ Excel เวอร์ชั่น 97-2003 ที่ดาวน์โหลดมาจากเว็บ)*
 
-## ข้อมูลที่ถูกดึง
-- **ชนิดของน้ำมัน (Product):** เช่น Gasohol 91-E10, Gasohol 95-E10, Gasohol 95-E20, ULG 95 RON, HSD B7, HSD B10, HSD B20 เป็นต้น (แปลงเป็นภาษาอังกฤษทั้งหมดแล้ว)
-- **วันที่ (Date):** อิงจากวันที่ที่ประกาศใช้ราคา ในรูปแบบ `YYYY-MM-DD`
-- **บริษัท (Company):** ผู้ให้บริการน้ำมันรายต่างๆ ได้แก่ PTT, BCP, Shell, Esso, Chevron, IRPC, PT, Susco, Pure, SUSCO Dealers
+---
 
-## ลำดับการใช้งาน
-สามารถดูขั้นตอนการใช้งานอย่างละเอียดได้ในไฟล์ [PROCESS.md](PROCESS.md)
+## การติดตั้ง (Installation)
+
+แนะนำให้ติดตั้ง Dependencies ผ่าน `requirements.txt`:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+**รายการ Libraries หลัก:**
+- `requests` - การเชื่อมต่อ HTTP Client
+- `beautifulsoup4` - การแกะและดึง Form Tokens (__VIEWSTATE, __EVENTVALIDATION)
+- `pandas` - การจัดการและแปลงโครงสร้างข้อมูล
+- `xlrd` - เครื่องมืออ่านไฟล์ Excel 97-2003 (.xls)
+- `lxml` - HTML Parser ความเร็วสูง
+- `pyarrow` - สำหรับส่งออกข้อมูลเป็น Apache Parquet
+
+---
+
+## รูปแบบข้อมูลที่ส่งออก (Data Formats)
+
+### 1. Wide Format (`Combined_Oil_Prices_Wide.csv` / `.parquet`)
+ตารางแนวนอนที่นำชื่อบริษัทน้ำมันเป็นหัวคอลัมน์ เหมาะสำหรับการเปิดดูด้วยโปรแกรม Microsoft Excel หรือทำตารางสรุป
+- **คอลัมน์:** `Date`, `Product`, `PTT`, `BCP`, `Shell`, `Esso`, `Chevron`, `IRPC`, `PT`, `Susco`, `Pure`, `SUSCO Dealers`
+
+### 2. Long Format / Tidy Data (`Combined_Oil_Prices_Long.csv` / `.parquet`)
+โครงสร้างแบบ Normalization (Unpivoted) ที่เหมาะสมที่สุดสำหรับงาน Data Warehouse, การเขียน Query SQL, และการทำ Visualizations (เช่น Power BI, Tableau, Looker Studio):
+- **คอลัมน์:**
+  - `Date`: วันที่ประกาศราคา (รูปแบบ `YYYY-MM-DD`)
+  - `Product`: ชื่อผลิตภัณฑ์น้ำมันมาตรฐานสากล (เช่น `Gasohol 95-E10`, `ULG 95 RON`, `HSD B7`, `Gasohol 95 Premium`)
+  - `Company`: ชื่อผู้ให้บริการปั๊มน้ำมัน (เช่น `PTT`, `Shell`, `BCP`, ฯลฯ)
+  - `Price`: ราคาน้ำมันขายปลีก (บาท/ลิตร)
+
+---
+
+## วิธีใช้งานเบื้องต้น (Quickstart)
+
+### 1. ดึงข้อมูลรายวันแบบ Incremental (รันอัตโนมัติหาวันล่าสุด)
+```bash
+python main.py
+```
+> ระบบจะสแกนหาวันที่ล่าสุดที่มีอยู่แล้ว และดาวน์โหลดต่อตั้งแต่วันถัดไปจนถึงวันนี้โดยอัตโนมัติ
+
+### 2. รวมและแปลงข้อมูล
+```bash
+python combine_data.py
+```
+> ระบบจะอ่านไฟล์ Excel ทั้งหมด คลีนชื่อผลิตภัณฑ์ สกัดราคา และส่งออกไฟล์ Wide/Long Formats ทั้ง CSV และ Parquet ไปยังโฟลเดอร์ `data/processed/`
+
+### 3. ตัวเลือกเพิ่มเติมผ่าน Command Line (CLI)
+- **ดึงข้อมูลระบุช่วงวันที่:**
+  ```bash
+  python main.py --start-date 2026-01-01 --end-date 2026-10-28
+  ```
+- **ส่งออกเฉพาะ Long Format:**
+  ```bash
+  python combine_data.py --format long
+  ```
+
+ดูรายละเอียดคำสั่งและตัวเลือกทั้งหมดได้ในเอกสาร [PROCESS.md](PROCESS.md)
