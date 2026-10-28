@@ -35,12 +35,6 @@ var PRODUCT_MAPPING = {
  * --------------------------------------------------------------------------
  * 1. การตั้งค่าและอ่านตัวแปรจาก Script Properties
  * --------------------------------------------------------------------------
- * ตัวแปรที่รองรับ (ตั้งค่าได้ที่ Project Settings > Script Properties):
- * - TARGET_SHEET_NAME : ชื่อ Sheet/แท็บ ที่ต้องการบันทึกข้อมูล (ค่าเริ่มต้น: แท็บแรก)
- * - SPREADSHEET_ID    : ID ของ Google Sheet (กรณีใช้งานแบบ Standalone Script)
- * - EPPO_URL          : URL หน้าเว็บ EPPO (ค่าเริ่มต้น: https://www2.eppo.go.th/epporop/entryreport/ropbydaypublic.aspx)
- * - TIMEZONE          : ไทม์โซน (ค่าเริ่มต้น: Asia/Bangkok)
- * - LINE_NOTIFY_TOKEN : Token สำหรับส่งการแจ้งเตือนเข้า LINE (ทางเลือก)
  */
 function getConfig() {
   var props = PropertiesService.getScriptProperties().getProperties();
@@ -82,13 +76,11 @@ function getTargetSheet(config) {
  * --------------------------------------------------------------------------
  * 2. ฟังก์ชันตรวจสอบความซ้ำซ้อน (Idempotency Check)
  * --------------------------------------------------------------------------
- * ตรวจสอบจากคอลัมน์ A (Date) ว่ามีวันที่ targetDate (YYYY-MM-DD) แล้วหรือไม่
  */
 function isDateAlreadyProcessed(sheet, targetDateStr) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
 
-  // อ่านเฉพาะคอลัมน์ A ตั้งแต่แถวที่ 2 จนถึงแถวสุดท้าย
   var datesRange = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
   for (var i = 0; i < datesRange.length; i++) {
     var cellVal = datesRange[i][0];
@@ -139,10 +131,10 @@ function dailySyncOilPrice() {
 
   console.info("Successfully appended " + numRows + " rows for " + dateIso + " starting at row " + startRow);
 
-  // 4. บันทึกวันที่ล่าสุดลง Script Properties (เป็นประวัติ)
+  // 4. บันทึกวันที่ล่าสุดลง Script Properties
   PropertiesService.getScriptProperties().setProperty('LAST_SYNCED_DATE', dateIso);
 
-  // 5. ส่งการแจ้งเตือน (กรณีตั้ง LINE_NOTIFY_TOKEN ไว้)
+  // 5. ส่งการแจ้งเตือน LINE (ทางเลือก)
   if (config.lineNotifyToken) {
     sendLineNotify(config.lineNotifyToken, "✅ [Thai Oil Price] อัปเดตราคาน้ำมันวันที่ " + dateIso + " เรียบร้อยแล้ว (" + numRows + " รายการ)");
   }
@@ -151,25 +143,49 @@ function dailySyncOilPrice() {
 }
 
 /**
+ * คืนค่า HTTP Headers แบบจำลอง Browser เต็มรูปแบบ
+ */
+function getBrowserHeaders() {
+  return {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'th,en-US;q=0.9,en;q=0.8',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1'
+  };
+}
+
+/**
  * --------------------------------------------------------------------------
  * 4. เชื่อมต่อ EPPO Web Scraper และดาวน์โหลดไฟล์
  * --------------------------------------------------------------------------
  */
 function fetchAndParseEppoData(dateIso, dateEppo, config) {
-  var headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-  };
+  var headers = getBrowserHeaders();
 
   // Step A: Initial GET to fetch ASP.NET tokens
   console.info("Fetching initial page to extract ASP.NET tokens...");
   var initRes = UrlFetchApp.fetch(config.eppoUrl, {
     method: 'get',
     headers: headers,
-    muteHttpExceptions: true
+    muteHttpExceptions: true,
+    followRedirects: true
   });
 
-  if (initRes.getResponseCode() !== 200) {
-    throw new Error("Failed to reach EPPO site. HTTP Status: " + initRes.getResponseCode());
+  var initCode = initRes.getResponseCode();
+  if (initCode !== 200) {
+    console.error("HTTP Status Code: " + initCode);
+    console.error("Response Headers: " + JSON.stringify(initRes.getHeaders()));
+    console.error("Response Body Preview (1500 chars):\n" + initRes.getContentText().substring(0, 1500));
+    throw new Error("Failed to reach EPPO site. HTTP Status: " + initCode + " (See Execution Log for details)");
   }
 
   var tokens = extractAspNetTokens(initRes.getContentText());
@@ -185,14 +201,21 @@ function fetchAndParseEppoData(dateIso, dateEppo, config) {
     'BtnGenerate.y': '10'
   };
 
+  var postHeaders = getBrowserHeaders();
+  postHeaders['Referer'] = config.eppoUrl;
+  postHeaders['Origin'] = 'https://www2.eppo.go.th';
+
   var postRes = UrlFetchApp.fetch(config.eppoUrl, {
     method: 'post',
     payload: payload,
-    headers: headers,
-    muteHttpExceptions: true
+    headers: postHeaders,
+    muteHttpExceptions: true,
+    followRedirects: true
   });
 
   if (postRes.getResponseCode() !== 200) {
+    console.error("POST Status: " + postRes.getResponseCode());
+    console.error("POST Response Body:\n" + postRes.getContentText().substring(0, 1500));
     throw new Error("POST request to EPPO failed with HTTP " + postRes.getResponseCode());
   }
 
@@ -200,12 +223,11 @@ function fetchAndParseEppoData(dateIso, dateEppo, config) {
   var blob = postRes.getBlob();
   var bytes = blob.getBytes();
 
-  // ตรวจสอบ Magic bytes ของ BIFF8 OLE2 (0xD0, 0xCF, 0x11, 0xE0) หรือ Content-Type
   var isBiff8 = bytes.length > 8 && (bytes[0] & 0xFF) === 0xD0 && (bytes[1] & 0xFF) === 0xCF && (bytes[2] & 0xFF) === 0x11 && (bytes[3] & 0xFF) === 0xE0;
   var isExcel = contentType.indexOf('application/vnd.ms-excel') !== -1 || isBiff8 || bytes.length > 50000;
 
   if (!isExcel) {
-    return null; // เซิร์ฟเวอร์ส่งกลับเป็นหน้า HTML ปกติ (ไม่มีข้อมูลราคาของวันนี้)
+    return null;
   }
 
   // Step C: แปลง .xls เป็น Google Sheet ชั่วคราวผ่าน Drive API
@@ -264,7 +286,6 @@ function convertXlsToTempSpreadsheet(blob) {
 
   var tempName = 'temp_eppo_import_' + new Date().getTime();
 
-  // รองรับทั้ง Drive API v3 และ Drive API v2
   try {
     // Drive API v3
     var resource = {
@@ -288,9 +309,6 @@ function convertXlsToTempSpreadsheet(blob) {
   }
 }
 
-/**
- * ลบไฟล์ชั่วคราวออกจาก Google Drive ทันทีหลังอ่านเสร็จ
- */
 function deleteTempFile(fileId) {
   try {
     DriveApp.getFileById(fileId).setTrashed(true);
@@ -313,14 +331,12 @@ function deleteTempFile(fileId) {
 function cleanProductName(rawName) {
   var cleaned = String(rawName).replace(/\u00a0/g, ' ').trim();
 
-  // แมปชื่อมาตรฐานภาษาอังกฤษตรงๆ
   for (var key in PRODUCT_MAPPING) {
     if (cleaned.indexOf(key) !== -1) {
       return PRODUCT_MAPPING[key];
     }
   }
 
-  // กลุ่มน้ำมันพรีเมียม (ตรวจสอบอย่างรัดกุม)
   if (cleaned.indexOf('พรีเมียม') !== -1 || cleaned.indexOf('Premium') !== -1) {
     if (cleaned.indexOf('ดีเซล') !== -1 || cleaned.indexOf('HSD') !== -1) {
       return 'HSD Premium';
@@ -362,7 +378,6 @@ function detectCompanyColumns(grid) {
     for (var i = 0; i < DETECTION_COMPANIES.length; i++) {
       var comp = DETECTION_COMPANIES[i];
       if (comp === 'PT') {
-        // ใช้ Word boundary สำหรับ PT ป้องกันการชนกับคำอื่น
         if (/\bpt\b/i.test(combinedText)) {
           matchedCompany = 'PT';
           break;
@@ -378,7 +393,6 @@ function detectCompanyColumns(grid) {
     }
   }
 
-  // Fallback กรณีหาหัวเรื่องไม่เจอ
   if (Object.keys(colToCompany).length < 5) {
     for (var j = 0; j < COMPANY_ORDER.length; j++) {
       if (j + 1 < numCols) {
@@ -427,7 +441,6 @@ function parseGridToWideRows(grid, dateIso) {
       continue;
     }
 
-    // แถวผลลัพธ์: [Date, Product, PTT, BCP, Shell, Esso, Chevron, IRPC, PT, Susco, Pure, SUSCO Dealers]
     var row = [dateIso, product];
     var compPriceMap = {};
 
@@ -457,12 +470,10 @@ function parseGridToWideRows(grid, dateIso) {
  * --------------------------------------------------------------------------
  * 7. ระบบตั้งเวลาอัตโนมัติ (Trigger Setup)
  * --------------------------------------------------------------------------
- * รันฟังก์ชันนี้ 1 ครั้ง เพื่อสร้าง Trigger รันทุกวันเวลา 08:00 และ 16:00 น.
  */
 function setupDailyTriggers() {
   removeDailyTriggers();
 
-  // รอบเช้า: 08:00 - 09:00 น.
   ScriptApp.newTrigger('dailySyncOilPrice')
     .timeBased()
     .atHour(8)
@@ -470,7 +481,6 @@ function setupDailyTriggers() {
     .inTimezone('Asia/Bangkok')
     .create();
 
-  // รอบเย็น: 16:00 - 17:00 น.
   ScriptApp.newTrigger('dailySyncOilPrice')
     .timeBased()
     .atHour(16)
@@ -481,9 +491,6 @@ function setupDailyTriggers() {
   console.info("✅ Daily triggers set successfully for 08:00 and 16:00 (Asia/Bangkok).");
 }
 
-/**
- * ลบ Trigger เดิมออกทั้งหมดเพื่อป้องกัน Trigger ซ้ำซ้อน
- */
 function removeDailyTriggers() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
@@ -496,13 +503,52 @@ function removeDailyTriggers() {
 
 /**
  * --------------------------------------------------------------------------
- * 8. ฟังก์ชันเสริมสำหรับทดสอบรันด้วยตัวเอง (Manual Testing)
+ * 8. ฟังก์ชันวินิจฉัยและทดสอบการเชื่อมต่อ (Diagnostic & Testing)
  * --------------------------------------------------------------------------
  */
 function testRunToday() {
   console.info("Testing run for today...");
   var res = dailySyncOilPrice();
   console.info("Result: " + res);
+}
+
+/**
+ * ฟังก์ชันสำหรับวินิจฉัยสาเหตุ HTTP 403 โดยเฉพาะ
+ * ให้เลือกฟังก์ชันนี้แล้วกด 'Run' ใน Apps Script เพื่อดู Response Body และ Headers
+ */
+function diagnoseEppoConnection() {
+  var config = getConfig();
+  console.info("=== Diagnosing Connection to: " + config.eppoUrl + " ===");
+
+  var headers = getBrowserHeaders();
+
+  try {
+    var res = UrlFetchApp.fetch(config.eppoUrl, {
+      method: 'get',
+      headers: headers,
+      muteHttpExceptions: true,
+      followRedirects: true
+    });
+
+    var code = res.getResponseCode();
+    var resHeaders = res.getHeaders();
+    var text = res.getContentText();
+
+    console.info("Response Code: " + code);
+    console.info("Response Headers: " + JSON.stringify(resHeaders, null, 2));
+    console.info("Response Body Length: " + text.length + " characters");
+    console.info("Response Body Preview (first 1500 chars):\n" + text.substring(0, 1500));
+
+    if (code === 200) {
+      console.info("✅ SUCCESS! Page fetched successfully with custom browser headers.");
+      var tokens = extractAspNetTokens(text);
+      console.info("Extracted ViewState length: " + tokens.__VIEWSTATE.length);
+    } else {
+      console.warn("⚠️ Server responded with HTTP " + code + ". Inspect the Response Body above to identify the firewall/WAF rule.");
+    }
+  } catch (e) {
+    console.error("Exception during fetch: " + e.message);
+  }
 }
 
 function sendLineNotify(token, message) {
