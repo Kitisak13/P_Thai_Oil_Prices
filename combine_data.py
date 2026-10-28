@@ -1,10 +1,7 @@
 import argparse
-from datetime import datetime
-import glob
 import logging
 from pathlib import Path
 import re
-import sys
 from typing import Optional
 
 import pandas as pd
@@ -67,16 +64,16 @@ def clean_product_name(raw_name: str) -> str:
         if key in cleaned:
             return val
 
-    # Premium products detection (handles Thai Unicode and mojibake)
-    if any(k in cleaned for k in ('พรีเมียม', 'Premium', 'ี')):
-        if any(k in cleaned for k in ('แก๊สโซฮอล์ 95', 'แก๊สโซฮอล ออกเทน 95', 'Gasohol 95', '95')):
-            return 'Gasohol 95 Premium'
+    # Premium products detection (strictly checks actual 'พรีเมียม' or 'Premium' keywords)
+    if 'พรีเมียม' in cleaned or 'Premium' in cleaned:
+        if any(k in cleaned for k in ('ดีเซล', 'HSD')):
+            return 'HSD Premium'
+        if any(k in cleaned for k in ('เบนซิน', 'ULG')):
+            return 'ULG 95 Premium'
         if any(k in cleaned for k in ('แก๊สโซฮอล ออกเทน 99', 'Gasohol 99', '99')):
             return 'Gasohol 99 Premium'
-        if any(k in cleaned for k in ('เบนซิน', 'ULG', 'ู')):
-            return 'ULG 95 Premium'
-        if any(k in cleaned for k in ('ดีเซล', 'HSD', 'ع')):
-            return 'HSD Premium'
+        if any(k in cleaned for k in ('แก๊สโซฮอล์ 95', 'แก๊สโซฮอล ออกเทน 95', 'Gasohol 95', 'แก๊สโซฮอล์', 'แก๊สโซฮอล', '95')):
+            return 'Gasohol 95 Premium'
 
     match = re.search(r'\((.*?)\)', cleaned)
     if match:
@@ -99,7 +96,11 @@ def detect_company_columns(df: pd.DataFrame) -> dict[int, str]:
 
         matched_company = None
         for comp in DETECTION_COMPANIES:
-            if comp.lower() in combined_text:
+            if comp == 'PT':
+                if re.search(r'\bpt\b', combined_text):
+                    matched_company = 'PT'
+                    break
+            elif comp.lower() in combined_text:
                 matched_company = comp
                 break
 

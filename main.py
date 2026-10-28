@@ -3,7 +3,6 @@ from datetime import date, datetime, timedelta
 import logging
 from pathlib import Path
 import re
-import sys
 import time
 from typing import Optional
 
@@ -79,99 +78,110 @@ def download_eppo_oil_prices(
     """Download daily oil price Excel reports from EPPO within the date range."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': (
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-        )
-    })
+    with requests.Session() as session:
+        session.headers.update({
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+            )
+        })
 
-    logging.info("Requesting initial page to obtain ASP.NET tokens...")
-    try:
-        res = session.get(EPPO_URL, timeout=timeout)
-        res.raise_for_status()
-        tokens = extract_tokens(res.text)
-        logging.info("ASP.NET tokens successfully extracted.")
-    except Exception as e:
-        logging.error(f"Failed to initialize session from EPPO: {e}")
-        return
+        logging.info("Requesting initial page to obtain ASP.NET tokens...")
+        try:
+            res = session.get(EPPO_URL, timeout=timeout)
+            res.raise_for_status()
+            tokens = extract_tokens(res.text)
+            logging.info("ASP.NET tokens successfully extracted.")
+        except Exception as e:
+            logging.error(f"Failed to initialize session from EPPO: {e}")
+            return
 
-    current_date = start_date
-    success_count = 0
-    skip_count = 0
-    fail_count = 0
+        current_date = start_date
+        success_count = 0
+        skip_count = 0
+        no_data_count = 0
+        fail_count = 0
 
-    while current_date <= end_date:
-        date_str = current_date.strftime('%d/%m/%Y')
-        filename = f"EPPO_RetailOilPrice_on_{current_date.strftime('%Y%m%d')}.xls"
-        filepath = output_dir / filename
+        while current_date <= end_date:
+            date_str = current_date.strftime('%d/%m/%Y')
+            filename = f"EPPO_RetailOilPrice_on_{current_date.strftime('%Y%m%d')}.xls"
+            filepath = output_dir / filename
 
-        # Check existing file (both in output_dir and legacy data dir)
-        legacy_file = LEGACY_DATA_DIR / filename
-        if (filepath.exists() and filepath.stat().st_size > 0) or (
-            legacy_file.exists() and legacy_file.stat().st_size > 0
-        ):
-            logging.info(f"File {filename} already exists. Skipping...")
-            skip_count += 1
-            current_date += timedelta(days=1)
-            continue
+            # Check existing file (both in output_dir and legacy data dir)
+            legacy_file = LEGACY_DATA_DIR / filename
+            if (filepath.exists() and filepath.stat().st_size > 0) or (
+                legacy_file.exists() and legacy_file.stat().st_size > 0
+            ):
+                logging.info(f"File {filename} already exists. Skipping...")
+                skip_count += 1
+                current_date += timedelta(days=1)
+                continue
 
-        logging.info(f"Downloading data for {date_str} ({current_date.strftime('%Y-%m-%d')})...")
-        payload = {
-            **tokens,
-            'TbxToDate': date_str,
-            'BtnGenerate.x': '10',
-            'BtnGenerate.y': '10',
-        }
+            logging.info(f"Downloading data for {date_str} ({current_date.strftime('%Y-%m-%d')})...")
+            payload = {
+                **tokens,
+                'TbxToDate': date_str,
+                'BtnGenerate.x': '10',
+                'BtnGenerate.y': '10',
+            }
 
-        downloaded = False
-        for attempt in range(1, max_retries + 1):
-            try:
-                post_res = session.post(EPPO_URL, data=payload, timeout=timeout)
-                post_res.raise_for_status()
+            downloaded = False
+            has_no_data = False
+            request_error = False
 
-                content_type = post_res.headers.get('Content-Type', '')
-                content_disp = post_res.headers.get('Content-Disposition', '')
-                is_excel_content = post_res.content.startswith(b'\xd0\xcf\x11\xe0') or (
-                    len(post_res.content) > 1000 and b'Workbook' in post_res.content
-                )
+            for attempt in range(1, max_retries + 1):
+                try:
+                    post_res = session.post(EPPO_URL, data=payload, timeout=timeout)
+                    post_res.raise_for_status()
 
-                if (
-                    'application/vnd.ms-excel' in content_type
-                    or content_disp
-                    or is_excel_content
-                ):
-                    filepath.write_bytes(post_res.content)
-                    logging.info(f"Successfully saved {filename} ({len(post_res.content):,} bytes)")
-                    success_count += 1
-                    downloaded = True
-                    break
-                else:
-                    logging.warning(
-                        f"No Excel file returned for {date_str}. (Response size: {len(post_res.content)} bytes)"
+                    content_type = post_res.headers.get('Content-Type', '')
+                    content_disp = post_res.headers.get('Content-Disposition', '')
+                    is_excel_content = post_res.content.startswith(b'\xd0\xcf\x11\xe0') or (
+                        len(post_res.content) > 1000 and b'Workbook' in post_res.content
                     )
-                    # Update tokens from response HTML in case server rotated ViewState
-                    try:
-                        tokens = extract_tokens(post_res.text)
-                    except ValueError:
-                        pass
-                    break
 
-            except requests.exceptions.RequestException as e:
-                logging.warning(f"Attempt {attempt}/{max_retries} failed for {date_str}: {e}")
-                time.sleep(2)
+                    if (
+                        'application/vnd.ms-excel' in content_type
+                        or content_disp
+                        or is_excel_content
+                    ):
+                        filepath.write_bytes(post_res.content)
+                        logging.info(f"Successfully saved {filename} ({len(post_res.content):,} bytes)")
+                        success_count += 1
+                        downloaded = True
+                        break
+                    else:
+                        logging.warning(
+                            f"No Excel file returned for {date_str} (no price announcement). (Response size: {len(post_res.content)} bytes)"
+                        )
+                        has_no_data = True
+                        # Update tokens from response HTML in case server rotated ViewState
+                        try:
+                            tokens = extract_tokens(post_res.text)
+                        except ValueError:
+                            pass
+                        break
 
-        if not downloaded and not (filepath.exists() and filepath.stat().st_size > 0):
-            fail_count += 1
+                except requests.exceptions.RequestException as e:
+                    logging.warning(f"Attempt {attempt}/{max_retries} failed for {date_str}: {e}")
+                    if attempt == max_retries:
+                        request_error = True
+                    time.sleep(2)
 
-        if delay > 0:
-            time.sleep(delay)
-        current_date += timedelta(days=1)
+            if not downloaded:
+                if has_no_data:
+                    no_data_count += 1
+                elif request_error:
+                    fail_count += 1
 
-    logging.info(
-        f"Download complete: {success_count} downloaded, {skip_count} skipped, {fail_count} failed."
-    )
+            if delay > 0:
+                time.sleep(delay)
+            current_date += timedelta(days=1)
+
+        logging.info(
+            f"Download complete: {success_count} downloaded, {skip_count} skipped, "
+            f"{no_data_count} no data, {fail_count} failed."
+        )
 
 
 def parse_date(date_string: str) -> date:

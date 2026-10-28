@@ -7,3 +7,4 @@ lxml>=5.0.0
 
 # Storage & Performance
 pyarrow>=15.0.0
+
